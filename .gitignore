@@ -1,0 +1,16 @@
+# Build output
+*.exe
+*.o
+cachesim
+bin/
+
+# Trace files (can be large)
+*.trace
+traces/
+!examples/*.trace
+
+# Python
+__pycache__/
+
+# Local reference copy, not part of the project
+_reference/
