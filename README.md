@@ -23,6 +23,15 @@ make            # Linux / macOS / WSL
 build.bat       # Windows (MinGW)
 ```
 
+## Testing
+
+```bash
+./tests/run_tests.sh
+```
+
+Builds the simulator and runs it on small traces whose hit/miss counts were worked out by hand
+(direct-mapped vs. 2-way, LRU vs. FIFO, Valgrind `M` and `I` lines).
+
 ## Usage
 
 ```
