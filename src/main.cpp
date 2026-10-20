@@ -81,28 +81,36 @@ int main(int argc, char** argv) {
     Access a;
     while (trace.next(a)) {
         if (a.op == 'I' && !include_instr) continue;
-        cache.access(a.addr);
-        if (a.op == 'M') cache.access(a.addr);  // modify = load then store
+        if (a.op == 'M') {  // modify (e.g. x++) = a read, then a write
+            cache.access(a.addr, false);
+            cache.access(a.addr, true);
+        } else {
+            cache.access(a.addr, a.op == 'S');  // S = store = write; L and I are reads
+        }
     }
 
     double total = double(cache.accesses());
     double hit_rate = total ? 100.0 * cache.hits() / total : 0.0;
 
-    std::cout << "cache:     ";
+    std::cout << "cache:         ";
     if (cfg.size >= 1024) std::cout << cfg.size / 1024 << " KB, ";
     else std::cout << cfg.size << " B, ";
     std::cout << cfg.block << " B blocks, ";
     if (cache.num_sets() == 1) std::cout << "fully associative";
     else std::cout << cache.ways() << "-way, " << cache.num_sets() << " sets";
     std::cout << ", " << (cfg.policy == Policy::LRU ? "LRU" : "FIFO") << "\n"
-              << "address:   tag | " << cache.index_bits() << " index bits | "
+              << "address:       tag | " << cache.index_bits() << " index bits | "
               << cache.offset_bits() << " offset bits\n"
-              << "accesses:  " << cache.accesses() << "\n"
-              << "hits:      " << cache.hits() << "\n"
-              << "misses:    " << cache.misses() << "\n"
+              << "accesses:      " << cache.accesses() << "\n"
+              << "  reads:       " << cache.reads() << "\n"
+              << "  writes:      " << cache.writes() << "\n"
+              << "hits:          " << cache.hits() << "\n"
+              << "misses:        " << cache.misses() << "\n"
+              << "  read misses: " << cache.read_misses() << "\n"
+              << "  write misses: " << cache.write_misses() << "\n"
               << std::fixed << std::setprecision(2)
-              << "hit rate:  " << hit_rate << "%\n"
-              << "miss rate: " << (total ? 100.0 - hit_rate : 0.0) << "%\n";
+              << "hit rate:      " << hit_rate << "%\n"
+              << "miss rate:     " << (total ? 100.0 - hit_rate : 0.0) << "%\n";
     if (trace.skipped_lines)
         std::cout << "(skipped " << trace.skipped_lines << " unreadable lines)\n";
     return 0;

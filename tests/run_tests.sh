@@ -8,7 +8,9 @@ cd "$(dirname "$0")/.."
 command -v g++ >/dev/null 2>&1 || export PATH="/c/MinGW/bin:$PATH"
 
 echo "Building..."
-g++ -std=c++14 -O2 -Wall -Wextra -o cachesim src/main.cpp src/cache.cpp src/trace.cpp || exit 1
+# On Windows, link statically so cachesim.exe also runs outside this script
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) STATIC=-static ;; *) STATIC= ;; esac
+g++ -std=c++14 -O2 -Wall -Wextra $STATIC -o cachesim src/main.cpp src/cache.cpp src/trace.cpp || exit 1
 SIM=./cachesim
 [ -f cachesim.exe ] && SIM=./cachesim.exe
 
@@ -45,6 +47,30 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do echo " L 40,4"; done > "$TMP/repeat.trace"
 # M (modify) counts as a load plus a store, and I (instruction) lines are skipped by default.
 printf 'I  0400d7d4,8\n M 00,4\n' > "$TMP/modify.trace"
 
+# check_rw <name> <reads> <writes> <read misses> <write misses> <trace file> [options...]
+check_rw() {
+    local name=$1 want="$2 $3 $4 $5" trace=$6
+    shift 6
+    local out got
+    out=$("$SIM" "$@" "$trace" 2>&1)
+    got=$(echo "$out" | awk '
+        $1 == "reads:"                     { r  = $2 }
+        $1 == "writes:"                    { w  = $2 }
+        $1 == "read"  && $2 == "misses:"   { rm = $3 }
+        $1 == "write" && $2 == "misses:"   { wm = $3 }
+        END { print r, w, rm, wm }')
+    if [ "$got" = "$want" ]; then
+        echo "  PASS  $name"
+        pass=$((pass + 1))
+    else
+        echo "  FAIL  $name: expected reads/writes/read misses/write misses = $want, got $got"
+        fail=$((fail + 1))
+    fi
+}
+
+# Write to a block, then read it: the write misses and brings the block in, so the read hits.
+printf ' S 00,4\n L 00,4\n' > "$TMP/write_then_read.trace"
+
 echo "Running tests..."
 check "direct-mapped sample"        5 7 examples/sample.trace -s 64 -b 16 -a 1
 check "2-way removes the conflict"  4 7 examples/sample.trace -s 64 -b 16 -a 2
@@ -53,6 +79,12 @@ check "FIFO evicts oldest"          4 5 "$TMP/abaca.trace"    -s 32 -b 16 -a ful
 check "repeated block hits"         1 10 "$TMP/repeat.trace"
 check "modify = load + store"       1 2 "$TMP/modify.trace"
 check "-i includes instructions"    2 3 "$TMP/modify.trace"   -i
+
+# sample.trace: 6 loads + 1 store. The store (S 14) hits block 1, which L 10 just loaded.
+check_rw "sample: reads vs writes"     6 1 5 0 examples/sample.trace -s 64 -b 16 -a 1
+check_rw "modify = 1 read + 1 write"   1 1 1 0 "$TMP/modify.trace"
+check_rw "instruction fetch is a read" 2 1 2 0 "$TMP/modify.trace" -i
+check_rw "write miss, then read hit"   1 1 0 1 "$TMP/write_then_read.trace"
 
 echo
 echo "$pass passed, $fail failed"

@@ -27,8 +27,9 @@ Cache::Cache(const CacheConfig& cfg) : cfg_(cfg) {
     lines_.resize(num_lines);
 }
 
-bool Cache::access(uint64_t addr) {
+bool Cache::access(uint64_t addr, bool is_write) {
     ++clock_;
+    if (is_write) ++writes_; else ++reads_;
 
     // address = [ tag | set index | block offset ]
     uint64_t block_num = addr >> offset_bits_;
@@ -39,12 +40,11 @@ bool Cache::access(uint64_t addr) {
     for (uint32_t w = 0; w < ways_; ++w) {
         if (set[w].valid && set[w].tag == tag) {
             set[w].last_used = clock_;
-            ++hits_;
             return true;
         }
     }
 
-    ++misses_;
+    if (is_write) ++write_misses_; else ++read_misses_;
     Line& victim = choose_victim(set);
     victim.valid = true;
     victim.tag = tag;
