@@ -9,6 +9,8 @@ the hit and miss rates.
 - Configurable cache size, block size, and associativity (direct-mapped to fully associative)
 - LRU and FIFO replacement
 - Reads Valgrind `lackey` traces
+- Separate hit/miss counts for reads (loads) and writes (stores)
+- Sample workloads plus a script that records their traces with Valgrind
 
 ### Roadmap
 - [ ] Second cache level (L2)
@@ -48,22 +50,43 @@ Example with a tiny direct-mapped cache:
 
 ```
 $ ./cachesim -s 64 -b 16 -a 1 examples/sample.trace
-cache:     64 B, 16 B blocks, 1-way, 4 sets, LRU
-address:   tag | 2 index bits | 4 offset bits
-accesses:  7
-hits:      2
-misses:    5
-hit rate:  28.57%
-miss rate: 71.43%
+cache:         64 B, 16 B blocks, 1-way, 4 sets, LRU
+address:       tag | 2 index bits | 4 offset bits
+accesses:      7
+  reads:       6
+  writes:      1
+hits:          2
+misses:        5
+  read misses: 5
+  write misses: 0
+hit rate:      28.57%
+miss rate:     71.43%
 ```
 
 ## Getting traces
 
-On Linux (or WSL on Windows), record any program's memory accesses with Valgrind:
+Traces are recorded with Valgrind on Linux or WSL (`sudo apt install valgrind`).
+
+The `workloads/` folder has small C programs with different memory access patterns:
+
+| Program | Access pattern |
+|---|---|
+| `sequential.c` | fills and sums a 1 MB array front to back |
+| `random.c` | 256K reads from random spots in a 4 MB array |
+| `matmul.c` | 64 x 64 matrix multiply (reads one matrix across rows, the other down columns) |
+| `histogram.c` | 256K increments into 4096 counters (write-heavy) |
+
+Record all of them into `traces/`:
+
+```bash
+./scripts/make_traces.sh
+./cachesim traces/matmul.trace
+```
+
+Or trace any program of your own:
 
 ```bash
 valgrind --tool=lackey --trace-mem=yes --log-file=prog.trace ./your_program
-./cachesim prog.trace
 ```
 
 ## How it works
