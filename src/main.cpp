@@ -15,6 +15,9 @@ options:
   -b BYTES   block size                   (default 64)
   -a WAYS    associativity, or "full"     (default 8)
   -p POLICY  lru | fifo                   (default lru)
+  -w POLICY  wb (write-back) | wt (write-through)          (default wb)
+  -W POLICY  wa (write-allocate) | nwa (no-write-allocate)
+             on a write miss                 (default wa for wb, nwa for wt)
   -i         include instruction fetches ('I' lines)
 )";
 
@@ -32,6 +35,7 @@ static uint64_t parse_size(const std::string& text) {
 
 int main(int argc, char** argv) {
     CacheConfig cfg;
+    bool alloc_given = false;
     bool include_instr = false;
     std::string trace_path;
 
@@ -53,11 +57,27 @@ int main(int argc, char** argv) {
                 if (v == "lru") cfg.policy = Policy::LRU;
                 else if (v == "fifo") cfg.policy = Policy::FIFO;
                 else throw std::invalid_argument("unknown policy: " + v);
+            } else if (arg == "-w") {
+                std::string v = value();
+                if (v == "wb") cfg.write = WritePolicy::WriteBack;
+                else if (v == "wt") cfg.write = WritePolicy::WriteThrough;
+                else throw std::invalid_argument("unknown write policy: " + v);
+            } else if (arg == "-W") {
+                std::string v = value();
+                if (v == "wa") cfg.alloc = AllocPolicy::WriteAllocate;
+                else if (v == "nwa") cfg.alloc = AllocPolicy::NoWriteAllocate;
+                else throw std::invalid_argument("unknown allocation policy: " + v);
+                alloc_given = true;
             } else if (arg == "-i") include_instr = true;
             else if (arg[0] == '-') throw std::invalid_argument("unknown option: " + arg);
             else trace_path = arg;
         }
         if (trace_path.empty()) { std::cerr << USAGE; return 2; }
+
+        // The usual pairings: write-back + write-allocate, write-through + no-write-allocate
+        if (!alloc_given)
+            cfg.alloc = cfg.write == WritePolicy::WriteBack ? AllocPolicy::WriteAllocate
+                                                            : AllocPolicy::NoWriteAllocate;
     } catch (const std::exception& e) {
         std::cerr << "error: " << e.what() << "\n";
         return 2;
@@ -82,12 +102,15 @@ int main(int argc, char** argv) {
     while (trace.next(a)) {
         if (a.op == 'I' && !include_instr) continue;
         if (a.op == 'M') {  // modify (e.g. x++) = a read, then a write
-            cache.access(a.addr, false);
-            cache.access(a.addr, true);
+            cache.access(a.addr, false, a.size);
+            cache.access(a.addr, true, a.size);
         } else {
-            cache.access(a.addr, a.op == 'S');  // S = store = write; L and I are reads
+            cache.access(a.addr, a.op == 'S', a.size);  // S = store = write; L and I are reads
         }
     }
+
+    // The program is over: blocks still dirty must be saved, or write-back would look free.
+    cache.flush();
 
     double total = double(cache.accesses());
     double hit_rate = total ? 100.0 * cache.hits() / total : 0.0;
@@ -99,6 +122,9 @@ int main(int argc, char** argv) {
     if (cache.num_sets() == 1) std::cout << "fully associative";
     else std::cout << cache.ways() << "-way, " << cache.num_sets() << " sets";
     std::cout << ", " << (cfg.policy == Policy::LRU ? "LRU" : "FIFO") << "\n"
+              << "write policy:  "
+              << (cfg.write == WritePolicy::WriteBack ? "write-back" : "write-through") << " + "
+              << (cfg.alloc == AllocPolicy::WriteAllocate ? "write-allocate" : "no-write-allocate") << "\n"
               << "address:       tag | " << cache.index_bits() << " index bits | "
               << cache.offset_bits() << " offset bits\n"
               << "accesses:      " << cache.accesses() << "\n"
@@ -110,7 +136,11 @@ int main(int argc, char** argv) {
               << "  write misses: " << cache.write_misses() << "\n"
               << std::fixed << std::setprecision(2)
               << "hit rate:      " << hit_rate << "%\n"
-              << "miss rate:     " << (total ? 100.0 - hit_rate : 0.0) << "%\n";
+              << "miss rate:     " << (total ? 100.0 - hit_rate : 0.0) << "%\n"
+              << "memory traffic:\n"
+              << "  bytes read:    " << cache.bytes_read_from_memory() << "\n"
+              << "  bytes written: " << cache.bytes_written_to_memory() << "\n"
+              << "  dirty evictions: " << cache.dirty_evictions() << "\n";
     if (trace.skipped_lines)
         std::cout << "(skipped " << trace.skipped_lines << " unreadable lines)\n";
     return 0;

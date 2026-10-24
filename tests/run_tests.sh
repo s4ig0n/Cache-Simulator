@@ -68,6 +68,31 @@ check_rw() {
     fi
 }
 
+# check_mem <name> <bytes read> <bytes written> <dirty evictions> <trace file> [options...]
+check_mem() {
+    local name=$1 want="$2 $3 $4" trace=$5
+    shift 5
+    local got
+    got=$("$SIM" "$@" "$trace" 2>&1 | awk '
+        $1 == "bytes" && $2 == "read:"    { r = $3 }
+        $1 == "bytes" && $2 == "written:" { w = $3 }
+        $1 == "dirty" && $2 == "evictions:" { d = $3 }
+        END { print r, w, d }')
+    if [ "$got" = "$want" ]; then
+        echo "  PASS  $name"
+        pass=$((pass + 1))
+    else
+        echo "  FAIL  $name: expected bytes read/written/dirty evictions = $want, got $got"
+        fail=$((fail + 1))
+    fi
+}
+
+# Ten 4-byte stores to the same address.
+for _ in 1 2 3 4 5 6 7 8 9 10; do echo " S 00,4"; done > "$TMP/ten_stores.trace"
+
+# Write block 0, then read block 4, which needs the same spot in a direct-mapped cache.
+printf ' S 00,4\n L 40,4\n' > "$TMP/evict_dirty.trace"
+
 # Write to a block, then read it: the write misses and brings the block in, so the read hits.
 printf ' S 00,4\n L 00,4\n' > "$TMP/write_then_read.trace"
 
@@ -85,6 +110,20 @@ check_rw "sample: reads vs writes"     6 1 5 0 examples/sample.trace -s 64 -b 16
 check_rw "modify = 1 read + 1 write"   1 1 1 0 "$TMP/modify.trace"
 check_rw "instruction fetch is a read" 2 1 2 0 "$TMP/modify.trace" -i
 check_rw "write miss, then read hit"   1 1 0 1 "$TMP/write_then_read.trace"
+
+# 64-byte cache, 16-byte blocks
+# Write-back: fetch the block once (16), save it once at the end (16).
+check_mem "write-back saves once"           16 16 0 "$TMP/ten_stores.trace" -s 64 -b 16 -a full -w wb
+check      "write-back: 1 miss"             1 10    "$TMP/ten_stores.trace" -s 64 -b 16 -a full -w wb
+# Write-through + no-write-allocate: never fetched, every store sent on (10 x 4 bytes).
+check_mem "write-through sends every write"  0 40 0 "$TMP/ten_stores.trace" -s 64 -b 16 -a full -w wt
+check      "no-write-allocate: all miss"    10 10   "$TMP/ten_stores.trace" -s 64 -b 16 -a full -w wt
+# Write-through + write-allocate: fetched once, still every store sent on.
+check_mem "write-through + allocate"        16 40 0 "$TMP/ten_stores.trace" -s 64 -b 16 -a full -w wt -W wa
+# Write-back: block 4 evicts dirty block 0, which must be saved (16) before 2 fetches (32).
+check_mem "dirty block saved on eviction"   32 16 1 "$TMP/evict_dirty.trace" -s 64 -b 16 -a 1 -w wb
+# Write-through: the store goes straight to memory (4), only block 4 is fetched (16).
+check_mem "write-through never dirty"       16 4 0  "$TMP/evict_dirty.trace" -s 64 -b 16 -a 1 -w wt
 
 echo
 echo "$pass passed, $fail failed"

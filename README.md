@@ -10,11 +10,11 @@ the hit and miss rates.
 - LRU and FIFO replacement
 - Reads Valgrind `lackey` traces
 - Separate hit/miss counts for reads (loads) and writes (stores)
+- Write-back or write-through, with write-allocate or no-write-allocate, and a count of bytes moved to and from memory
 - Sample workloads plus a script that records their traces with Valgrind
 
 ### Roadmap
 - [ ] Second cache level (L2)
-- [ ] Write-back vs. write-through policies
 - [ ] Average memory access time (AMAT)
 - [ ] Experiments: miss rate vs. associativity, cache size, and block size, with graphs
 
@@ -43,6 +43,9 @@ cachesim [options] <trace-file>
   -b BYTES   block size                   (default 64)
   -a WAYS    associativity, or "full"     (default 8)
   -p POLICY  lru | fifo                   (default lru)
+  -w POLICY  wb (write-back) | wt (write-through)    (default wb)
+  -W POLICY  wa | nwa: write-allocate or not on a write miss
+                                       (default wa for wb, nwa for wt)
   -i         include instruction fetches
 ```
 
@@ -51,6 +54,7 @@ Example with a tiny direct-mapped cache:
 ```
 $ ./cachesim -s 64 -b 16 -a 1 examples/sample.trace
 cache:         64 B, 16 B blocks, 1-way, 4 sets, LRU
+write policy:  write-back + write-allocate
 address:       tag | 2 index bits | 4 offset bits
 accesses:      7
   reads:       6
@@ -61,6 +65,10 @@ misses:        5
   write misses: 0
 hit rate:      28.57%
 miss rate:     71.43%
+memory traffic:
+  bytes read:    80
+  bytes written: 16
+  dirty evictions: 1
 ```
 
 ## Getting traces

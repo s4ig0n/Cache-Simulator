@@ -27,7 +27,7 @@ Cache::Cache(const CacheConfig& cfg) : cfg_(cfg) {
     lines_.resize(num_lines);
 }
 
-bool Cache::access(uint64_t addr, bool is_write) {
+bool Cache::access(uint64_t addr, bool is_write, uint32_t bytes) {
     ++clock_;
     if (is_write) ++writes_; else ++reads_;
 
@@ -40,17 +40,50 @@ bool Cache::access(uint64_t addr, bool is_write) {
     for (uint32_t w = 0; w < ways_; ++w) {
         if (set[w].valid && set[w].tag == tag) {
             set[w].last_used = clock_;
+            if (is_write) write(set[w], bytes);
             return true;
         }
     }
 
     if (is_write) ++write_misses_; else ++read_misses_;
+
+    // No-write-allocate: send the write straight to memory and don't bring the block in.
+    if (is_write && cfg_.alloc == AllocPolicy::NoWriteAllocate) {
+        mem_bytes_written_ += bytes;
+        return false;
+    }
+
     Line& victim = choose_victim(set);
+    if (victim.valid && victim.dirty) {
+        // Its changes only exist here, so save the whole block before it's replaced.
+        ++dirty_evictions_;
+        mem_bytes_written_ += cfg_.block;
+    }
+
+    mem_bytes_read_ += cfg_.block;  // fetch the new block from memory
     victim.valid = true;
+    victim.dirty = false;
     victim.tag = tag;
     victim.last_used = clock_;
     victim.filled_at = clock_;
+    if (is_write) write(victim, bytes);
     return false;
+}
+
+void Cache::write(Line& line, uint32_t bytes) {
+    if (cfg_.write == WritePolicy::WriteThrough)
+        mem_bytes_written_ += bytes;  // update memory right away
+    else
+        line.dirty = true;            // update memory later, when the block is evicted
+}
+
+void Cache::flush() {
+    for (Line& line : lines_) {
+        if (line.valid && line.dirty) {
+            mem_bytes_written_ += cfg_.block;
+            line.dirty = false;
+        }
+    }
 }
 
 Cache::Line& Cache::choose_victim(Line* set) {
