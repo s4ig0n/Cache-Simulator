@@ -18,6 +18,8 @@ struct CacheConfig {
     Policy policy = Policy::LRU;
     WritePolicy write = WritePolicy::WriteBack;
     AllocPolicy alloc = AllocPolicy::WriteAllocate;
+    uint32_t hit_latency = 4;       // cycles to answer a hit
+    uint32_t memory_latency = 100;  // cycles main memory takes (only used if nothing is below)
 };
 
 class Cache {
@@ -27,8 +29,8 @@ public:
     // Throws std::invalid_argument if the configuration doesn't make sense.
     explicit Cache(const CacheConfig& cfg, Cache* next = nullptr);
 
-    // Simulates one read or write of `bytes` bytes. Returns true on a hit, false on a miss.
-    bool access(uint64_t addr, bool is_write, uint32_t bytes);
+    // Simulates one read or write of `bytes` bytes. Returns how many cycles it took.
+    uint64_t access(uint64_t addr, bool is_write, uint32_t bytes);
 
     // Writes every dirty block to the level below, as happens when a program ends.
     void flush();
@@ -64,7 +66,7 @@ private:
 
     Line& choose_victim(Line* set);
     void write(Line& line, uint64_t addr, uint32_t bytes);
-    void read_below(uint64_t addr, uint32_t bytes);
+    uint64_t read_below(uint64_t addr, uint32_t bytes);
     void write_below(uint64_t addr, uint32_t bytes);
     uint64_t block_addr(uint64_t tag, uint64_t set_index) const;
 

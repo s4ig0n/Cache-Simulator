@@ -19,14 +19,17 @@ L1 options:
   -w POLICY  wb (write-back) | wt (write-through)          (default wb)
   -W POLICY  wa (write-allocate) | nwa (no-write-allocate)
              on a write miss                 (default wa for wb, nwa for wt)
+  -L CYCLES  hit time                     (default 4)
 
 L2 options (L2 is only added if you give at least one of these):
   --l2-size SIZE     (default 256K)      --l2-policy POLICY  (default lru)
   --l2-block BYTES   (default 64)        --l2-write POLICY   (default wb)
   --l2-assoc WAYS    (default 8)         --l2-alloc POLICY
+  --l2-lat CYCLES    (default 12)
 
 Other:
-  -i         include instruction fetches ('I' lines)
+  --mem-lat CYCLES  main memory access time   (default 100)
+  -i                include instruction fetches ('I' lines)
 )";
 
 // "32K" -> 32768, "1M" -> 1048576, "64" -> 64
@@ -53,6 +56,7 @@ static void set_option(LevelOptions& level, const std::string& key, const std::s
     if (key == "size") c.size = parse_size(v);
     else if (key == "block") c.block = uint32_t(parse_size(v));
     else if (key == "assoc") c.assoc = v == "full" ? 0 : uint32_t(parse_size(v));
+    else if (key == "lat") c.hit_latency = uint32_t(parse_size(v));
     else if (key == "policy") {
         if (v == "lru") c.policy = Policy::LRU;
         else if (v == "fifo") c.policy = Policy::FIFO;
@@ -84,7 +88,8 @@ static void print_level(const std::string& name, const Cache& cache) {
     std::cout << cfg.block << " B blocks, ";
     if (cache.num_sets() == 1) std::cout << "fully associative";
     else std::cout << cache.ways() << "-way, " << cache.num_sets() << " sets";
-    std::cout << ", " << (cfg.policy == Policy::LRU ? "LRU" : "FIFO") << "\n"
+    std::cout << ", " << (cfg.policy == Policy::LRU ? "LRU" : "FIFO") << ", "
+              << cfg.hit_latency << "-cycle hit\n"
               << p << "write policy:  "
               << (cfg.write == WritePolicy::WriteBack ? "write-back" : "write-through") << " + "
               << (cfg.alloc == AllocPolicy::WriteAllocate ? "write-allocate" : "no-write-allocate") << "\n"
@@ -106,6 +111,8 @@ static void print_level(const std::string& name, const Cache& cache) {
 int main(int argc, char** argv) {
     LevelOptions l1, l2;
     l2.cfg.size = 256 * 1024;
+    l2.cfg.hit_latency = 12;
+    uint32_t memory_latency = 100;
     bool use_l2 = false;
     bool include_instr = false;
     std::string trace_path;
@@ -124,6 +131,8 @@ int main(int argc, char** argv) {
             else if (arg == "-p") set_option(l1, "policy", value());
             else if (arg == "-w") set_option(l1, "write", value());
             else if (arg == "-W") set_option(l1, "alloc", value());
+            else if (arg == "-L") set_option(l1, "lat", value());
+            else if (arg == "--mem-lat") memory_latency = uint32_t(parse_size(value()));
             else if (arg.compare(0, 5, "--l2-") == 0) {
                 set_option(l2, arg.substr(5), value());
                 use_l2 = true;
@@ -139,6 +148,9 @@ int main(int argc, char** argv) {
                 level->cfg.alloc = level->cfg.write == WritePolicy::WriteBack
                                        ? AllocPolicy::WriteAllocate
                                        : AllocPolicy::NoWriteAllocate;
+
+        l1.cfg.memory_latency = memory_latency;
+        l2.cfg.memory_latency = memory_latency;
 
         // An L1 block must fit inside one L2 block, or one L1 fetch would span two L2 blocks
         if (use_l2 && l2.cfg.block < l1.cfg.block)
@@ -166,13 +178,15 @@ int main(int argc, char** argv) {
     }
 
     Access a;
+    uint64_t total_cycles = 0;
     while (trace.next(a)) {
         if (a.op == 'I' && !include_instr) continue;
         if (a.op == 'M') {  // modify (e.g. x++) = a read, then a write
-            cache.access(a.addr, false, a.size);
-            cache.access(a.addr, true, a.size);
+            total_cycles += cache.access(a.addr, false, a.size);
+            total_cycles += cache.access(a.addr, true, a.size);
         } else {
-            cache.access(a.addr, a.op == 'S', a.size);  // S = store = write; L and I are reads
+            // S = store = write; L and I are reads
+            total_cycles += cache.access(a.addr, a.op == 'S', a.size);
         }
     }
 
@@ -186,9 +200,16 @@ int main(int argc, char** argv) {
 
     // Traffic to main memory is whatever the bottom level sent below it.
     const Cache& bottom = l2_cache ? *l2_cache : cache;
-    std::cout << "memory traffic:\n"
+    std::cout << "memory:        " << memory_latency << "-cycle access\n"
+              << "memory traffic:\n"
               << "  bytes read:    " << bottom.bytes_read_below() << "\n"
-              << "  bytes written: " << bottom.bytes_written_below() << "\n";
+              << "  bytes written: " << bottom.bytes_written_below() << "\n\n";
+
+    // Average memory access time: total time spent waiting, divided by the number of accesses
+    double amat = cache.accesses() ? double(total_cycles) / cache.accesses() : 0.0;
+    std::cout << "total cycles:  " << total_cycles << "\n"
+              << "AMAT:          " << std::fixed << std::setprecision(2) << amat
+              << " cycles per access\n";
     if (trace.skipped_lines)
         std::cout << "(skipped " << trace.skipped_lines << " unreadable lines)\n";
     return 0;

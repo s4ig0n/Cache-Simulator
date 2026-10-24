@@ -105,6 +105,21 @@ check_l2() {
     fi
 }
 
+# check_amat <name> <expected AMAT> <trace file> [options...]
+check_amat() {
+    local name=$1 want=$2 trace=$3
+    shift 3
+    local got
+    got=$("$SIM" "$@" "$trace" 2>&1 | awk '$1 == "AMAT:" { print $2 }')
+    if [ "$got" = "$want" ]; then
+        echo "  PASS  $name"
+        pass=$((pass + 1))
+    else
+        echo "  FAIL  $name: expected AMAT $want, got ${got:-?}"
+        fail=$((fail + 1))
+    fi
+}
+
 # Ten 4-byte stores to the same address.
 for _ in 1 2 3 4 5 6 7 8 9 10; do echo " S 00,4"; done > "$TMP/ten_stores.trace"
 
@@ -153,6 +168,18 @@ check_l2  "L2 catches an L1 miss"       6 4    examples/sample.trace $L1_L2
 # Memory: 4 blocks fetched (64 B). Dirty block 1 sits in L2 until the final flush (16 B).
 check_mem "memory sees only L2 misses"  64 16 1 examples/sample.trace $L1_L2
 check_mem "same trace without L2"       80 16 1 examples/sample.trace -s 64 -b 16 -a 1
+
+# AMAT (default times: L1 hit 4, L2 hit 12, memory 100 cycles)
+# L1 only: 2 hits x 4 + 5 misses x (4 + 100) = 528 cycles / 7 accesses
+check_amat "AMAT, L1 only"              75.43 examples/sample.trace -s 64 -b 16 -a 1
+# With L2: 2 L1 hits x 4, 1 L2 hit x (4 + 12), 4 L2 misses x (4 + 12 + 100) = 488 / 7
+check_amat "AMAT, L2 saves time"        69.71 examples/sample.trace $L1_L2
+# Custom times: 2 x 1 + 5 x (1 + 10) = 57 / 7
+check_amat "custom hit and memory time" 8.14  examples/sample.trace -s 64 -b 16 -a 1 -L 1 --mem-lat 10
+# Write-back: first store misses (4 + 100), 9 hits x 4 = 140 / 10
+check_amat "AMAT, write-back stores"    14.00 "$TMP/ten_stores.trace" -s 64 -b 16 -a full -w wb
+# Write-through + no-write-allocate: every store misses but nobody waits for memory: 10 x 4 / 10
+check_amat "writes going down are free" 4.00  "$TMP/ten_stores.trace" -s 64 -b 16 -a full -w wt
 
 echo
 echo "$pass passed, $fail failed"

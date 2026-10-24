@@ -12,10 +12,10 @@ the hit and miss rates.
 - Separate hit/miss counts for reads (loads) and writes (stores)
 - Write-back or write-through, with write-allocate or no-write-allocate, and a count of bytes moved to and from memory
 - Optional second cache level (L2) with its own settings
+- Average memory access time (AMAT), from configurable L1, L2, and memory latencies
 - Sample workloads plus a script that records their traces with Valgrind
 
 ### Roadmap
-- [ ] Average memory access time (AMAT)
 - [ ] Experiments: miss rate vs. associativity, cache size, and block size, with graphs
 
 ## Building
@@ -47,21 +47,24 @@ L1 options:
   -w POLICY  wb (write-back) | wt (write-through)          (default wb)
   -W POLICY  wa (write-allocate) | nwa (no-write-allocate)
              on a write miss                 (default wa for wb, nwa for wt)
+  -L CYCLES  hit time                     (default 4)
 
 L2 options (L2 is only added if you give at least one of these):
   --l2-size SIZE     (default 256K)      --l2-policy POLICY  (default lru)
   --l2-block BYTES   (default 64)        --l2-write POLICY   (default wb)
   --l2-assoc WAYS    (default 8)         --l2-alloc POLICY
+  --l2-lat CYCLES    (default 12)
 
 Other:
-  -i         include instruction fetches ('I' lines)
+  --mem-lat CYCLES  main memory access time   (default 100)
+  -i                include instruction fetches ('I' lines)
 ```
 
 Example with a tiny direct-mapped cache:
 
 ```
 $ ./cachesim -s 64 -b 16 -a 1 examples/sample.trace
-L1 cache:      64 B, 16 B blocks, 1-way, 4 sets, LRU
+L1 cache:      64 B, 16 B blocks, 1-way, 4 sets, LRU, 4-cycle hit
 write policy:  write-back + write-allocate
 address:       tag | 2 index bits | 4 offset bits
 accesses:      7
@@ -75,9 +78,13 @@ hit rate:      28.57%
 miss rate:     71.43%
 dirty evictions: 1
 
+memory:        100-cycle access
 memory traffic:
   bytes read:    80
   bytes written: 16
+
+total cycles:  528
+AMAT:          75.43 cycles per access
 ```
 
 With an L2 cache under L1:

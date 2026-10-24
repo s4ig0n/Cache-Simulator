@@ -27,7 +27,7 @@ Cache::Cache(const CacheConfig& cfg, Cache* next) : cfg_(cfg), next_(next) {
     lines_.resize(num_lines);
 }
 
-bool Cache::access(uint64_t addr, bool is_write, uint32_t bytes) {
+uint64_t Cache::access(uint64_t addr, bool is_write, uint32_t bytes) {
     ++clock_;
     if (is_write) ++writes_; else ++reads_;
 
@@ -41,7 +41,7 @@ bool Cache::access(uint64_t addr, bool is_write, uint32_t bytes) {
         if (set[w].valid && set[w].tag == tag) {
             set[w].last_used = clock_;
             if (is_write) write(set[w], addr, bytes);
-            return true;
+            return cfg_.hit_latency;  // hit: just this level's time
         }
     }
 
@@ -50,7 +50,7 @@ bool Cache::access(uint64_t addr, bool is_write, uint32_t bytes) {
     // No-write-allocate: pass the write down and don't bring the block in.
     if (is_write && cfg_.alloc == AllocPolicy::NoWriteAllocate) {
         write_below(addr, bytes);
-        return false;
+        return cfg_.hit_latency;  // the write goes into a buffer; no waiting for it
     }
 
     Line& victim = choose_victim(set);
@@ -60,14 +60,16 @@ bool Cache::access(uint64_t addr, bool is_write, uint32_t bytes) {
         write_below(block_addr(victim.tag, set_index), cfg_.block);
     }
 
-    read_below(block_num << offset_bits_, cfg_.block);  // fetch the whole block
+    // Miss: we spent our own hit time finding out, plus however long the level below
+    // takes to hand us the block.
+    uint64_t cycles = cfg_.hit_latency + read_below(block_num << offset_bits_, cfg_.block);
     victim.valid = true;
     victim.dirty = false;
     victim.tag = tag;
     victim.last_used = clock_;
     victim.filled_at = clock_;
     if (is_write) write(victim, addr, bytes);
-    return false;
+    return cycles;
 }
 
 void Cache::write(Line& line, uint64_t addr, uint32_t bytes) {
@@ -78,11 +80,14 @@ void Cache::write(Line& line, uint64_t addr, uint32_t bytes) {
 }
 
 // The level below is the next cache if there is one, otherwise main memory.
-void Cache::read_below(uint64_t addr, uint32_t bytes) {
+// Returns how many cycles the level below took to answer.
+uint64_t Cache::read_below(uint64_t addr, uint32_t bytes) {
     bytes_read_below_ += bytes;
-    if (next_) next_->access(addr, false, bytes);
+    if (next_) return next_->access(addr, false, bytes);
+    return cfg_.memory_latency;
 }
 
+// Writes going down cost no time: real CPUs drop them in a write buffer and carry on.
 void Cache::write_below(uint64_t addr, uint32_t bytes) {
     bytes_written_below_ += bytes;
     if (next_) next_->access(addr, true, bytes);
