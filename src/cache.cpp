@@ -10,7 +10,7 @@ static uint32_t log2u(uint64_t x) {
     return n;
 }
 
-Cache::Cache(const CacheConfig& cfg) : cfg_(cfg) {
+Cache::Cache(const CacheConfig& cfg, Cache* next) : cfg_(cfg), next_(next) {
     if (!is_pow2(cfg.block))
         throw std::invalid_argument("block size must be a power of two");
     if (!is_pow2(cfg.size) || cfg.size < cfg.block)
@@ -40,16 +40,16 @@ bool Cache::access(uint64_t addr, bool is_write, uint32_t bytes) {
     for (uint32_t w = 0; w < ways_; ++w) {
         if (set[w].valid && set[w].tag == tag) {
             set[w].last_used = clock_;
-            if (is_write) write(set[w], bytes);
+            if (is_write) write(set[w], addr, bytes);
             return true;
         }
     }
 
     if (is_write) ++write_misses_; else ++read_misses_;
 
-    // No-write-allocate: send the write straight to memory and don't bring the block in.
+    // No-write-allocate: pass the write down and don't bring the block in.
     if (is_write && cfg_.alloc == AllocPolicy::NoWriteAllocate) {
-        mem_bytes_written_ += bytes;
+        write_below(addr, bytes);
         return false;
     }
 
@@ -57,31 +57,50 @@ bool Cache::access(uint64_t addr, bool is_write, uint32_t bytes) {
     if (victim.valid && victim.dirty) {
         // Its changes only exist here, so save the whole block before it's replaced.
         ++dirty_evictions_;
-        mem_bytes_written_ += cfg_.block;
+        write_below(block_addr(victim.tag, set_index), cfg_.block);
     }
 
-    mem_bytes_read_ += cfg_.block;  // fetch the new block from memory
+    read_below(block_num << offset_bits_, cfg_.block);  // fetch the whole block
     victim.valid = true;
     victim.dirty = false;
     victim.tag = tag;
     victim.last_used = clock_;
     victim.filled_at = clock_;
-    if (is_write) write(victim, bytes);
+    if (is_write) write(victim, addr, bytes);
     return false;
 }
 
-void Cache::write(Line& line, uint32_t bytes) {
+void Cache::write(Line& line, uint64_t addr, uint32_t bytes) {
     if (cfg_.write == WritePolicy::WriteThrough)
-        mem_bytes_written_ += bytes;  // update memory right away
+        write_below(addr, bytes);  // update the level below right away
     else
-        line.dirty = true;            // update memory later, when the block is evicted
+        line.dirty = true;         // update it later, when the block is evicted
+}
+
+// The level below is the next cache if there is one, otherwise main memory.
+void Cache::read_below(uint64_t addr, uint32_t bytes) {
+    bytes_read_below_ += bytes;
+    if (next_) next_->access(addr, false, bytes);
+}
+
+void Cache::write_below(uint64_t addr, uint32_t bytes) {
+    bytes_written_below_ += bytes;
+    if (next_) next_->access(addr, true, bytes);
+}
+
+// Rebuild a block's starting address from its tag and set: [ tag | set index | 0...0 ]
+uint64_t Cache::block_addr(uint64_t tag, uint64_t set_index) const {
+    return ((tag << index_bits_) | set_index) << offset_bits_;
 }
 
 void Cache::flush() {
-    for (Line& line : lines_) {
-        if (line.valid && line.dirty) {
-            mem_bytes_written_ += cfg_.block;
-            line.dirty = false;
+    for (uint64_t s = 0; s < num_sets_; ++s) {
+        for (uint32_t w = 0; w < ways_; ++w) {
+            Line& line = lines_[s * ways_ + w];
+            if (line.valid && line.dirty) {
+                write_below(block_addr(line.tag, s), cfg_.block);
+                line.dirty = false;
+            }
         }
     }
 }

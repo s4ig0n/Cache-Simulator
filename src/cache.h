@@ -22,13 +22,15 @@ struct CacheConfig {
 
 class Cache {
 public:
+    // `next` is the cache below this one (e.g. L2 under L1), or nullptr if
+    // the level below is main memory.
     // Throws std::invalid_argument if the configuration doesn't make sense.
-    explicit Cache(const CacheConfig& cfg);
+    explicit Cache(const CacheConfig& cfg, Cache* next = nullptr);
 
     // Simulates one read or write of `bytes` bytes. Returns true on a hit, false on a miss.
     bool access(uint64_t addr, bool is_write, uint32_t bytes);
 
-    // Writes every dirty block back to memory, as happens when a program ends.
+    // Writes every dirty block to the level below, as happens when a program ends.
     void flush();
 
     uint64_t reads() const { return reads_; }
@@ -39,10 +41,12 @@ public:
     uint64_t misses() const { return read_misses_ + write_misses_; }
     uint64_t hits() const { return accesses() - misses(); }
 
-    // Traffic between this cache and main memory
-    uint64_t bytes_read_from_memory() const { return mem_bytes_read_; }
-    uint64_t bytes_written_to_memory() const { return mem_bytes_written_; }
+    // Traffic between this cache and the level below it (the next cache, or memory)
+    uint64_t bytes_read_below() const { return bytes_read_below_; }
+    uint64_t bytes_written_below() const { return bytes_written_below_; }
     uint64_t dirty_evictions() const { return dirty_evictions_; }
+
+    const CacheConfig& config() const { return cfg_; }
 
     uint64_t num_sets() const { return num_sets_; }
     uint32_t ways() const { return ways_; }
@@ -59,9 +63,13 @@ private:
     };
 
     Line& choose_victim(Line* set);
-    void write(Line& line, uint32_t bytes);
+    void write(Line& line, uint64_t addr, uint32_t bytes);
+    void read_below(uint64_t addr, uint32_t bytes);
+    void write_below(uint64_t addr, uint32_t bytes);
+    uint64_t block_addr(uint64_t tag, uint64_t set_index) const;
 
     CacheConfig cfg_;
+    Cache* next_;
     uint64_t num_sets_;
     uint32_t ways_;
     uint32_t offset_bits_;
@@ -72,7 +80,7 @@ private:
     uint64_t writes_ = 0;
     uint64_t read_misses_ = 0;
     uint64_t write_misses_ = 0;
-    uint64_t mem_bytes_read_ = 0;
-    uint64_t mem_bytes_written_ = 0;
+    uint64_t bytes_read_below_ = 0;
+    uint64_t bytes_written_below_ = 0;
     uint64_t dirty_evictions_ = 0;
 };

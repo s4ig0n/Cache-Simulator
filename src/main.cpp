@@ -2,6 +2,7 @@
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
 #include <string>
 
@@ -10,7 +11,7 @@
 
 static const char* USAGE = R"(usage: cachesim [options] <trace-file>
 
-options:
+L1 options:
   -s SIZE    cache size, e.g. 32K, 1M     (default 32K)
   -b BYTES   block size                   (default 64)
   -a WAYS    associativity, or "full"     (default 8)
@@ -18,6 +19,13 @@ options:
   -w POLICY  wb (write-back) | wt (write-through)          (default wb)
   -W POLICY  wa (write-allocate) | nwa (no-write-allocate)
              on a write miss                 (default wa for wb, nwa for wt)
+
+L2 options (L2 is only added if you give at least one of these):
+  --l2-size SIZE     (default 256K)      --l2-policy POLICY  (default lru)
+  --l2-block BYTES   (default 64)        --l2-write POLICY   (default wb)
+  --l2-assoc WAYS    (default 8)         --l2-alloc POLICY
+
+Other:
   -i         include instruction fetches ('I' lines)
 )";
 
@@ -33,9 +41,72 @@ static uint64_t parse_size(const std::string& text) {
     return n;
 }
 
-int main(int argc, char** argv) {
+// One cache level's settings, plus whether the user picked the allocation policy.
+struct LevelOptions {
     CacheConfig cfg;
     bool alloc_given = false;
+};
+
+// Applies one setting ("size", "block", "assoc", "policy", "write" or "alloc") to a level.
+static void set_option(LevelOptions& level, const std::string& key, const std::string& v) {
+    CacheConfig& c = level.cfg;
+    if (key == "size") c.size = parse_size(v);
+    else if (key == "block") c.block = uint32_t(parse_size(v));
+    else if (key == "assoc") c.assoc = v == "full" ? 0 : uint32_t(parse_size(v));
+    else if (key == "policy") {
+        if (v == "lru") c.policy = Policy::LRU;
+        else if (v == "fifo") c.policy = Policy::FIFO;
+        else throw std::invalid_argument("unknown policy: " + v);
+    } else if (key == "write") {
+        if (v == "wb") c.write = WritePolicy::WriteBack;
+        else if (v == "wt") c.write = WritePolicy::WriteThrough;
+        else throw std::invalid_argument("unknown write policy: " + v);
+    } else if (key == "alloc") {
+        if (v == "wa") c.alloc = AllocPolicy::WriteAllocate;
+        else if (v == "nwa") c.alloc = AllocPolicy::NoWriteAllocate;
+        else throw std::invalid_argument("unknown allocation policy: " + v);
+        level.alloc_given = true;
+    } else {
+        throw std::invalid_argument("unknown option: " + key);
+    }
+}
+
+static void print_level(const std::string& name, const Cache& cache) {
+    const CacheConfig& cfg = cache.config();
+    double total = double(cache.accesses());
+    double miss_rate = total ? 100.0 * cache.misses() / total : 0.0;
+    // L1's lines have no prefix, so its output looks the same with or without an L2
+    std::string p = name == "L1" ? "" : name + " ";
+
+    std::cout << name << " cache:      ";
+    if (cfg.size >= 1024) std::cout << cfg.size / 1024 << " KB, ";
+    else std::cout << cfg.size << " B, ";
+    std::cout << cfg.block << " B blocks, ";
+    if (cache.num_sets() == 1) std::cout << "fully associative";
+    else std::cout << cache.ways() << "-way, " << cache.num_sets() << " sets";
+    std::cout << ", " << (cfg.policy == Policy::LRU ? "LRU" : "FIFO") << "\n"
+              << p << "write policy:  "
+              << (cfg.write == WritePolicy::WriteBack ? "write-back" : "write-through") << " + "
+              << (cfg.alloc == AllocPolicy::WriteAllocate ? "write-allocate" : "no-write-allocate") << "\n"
+              << p << "address:       tag | " << cache.index_bits() << " index bits | "
+              << cache.offset_bits() << " offset bits\n"
+              << p << "accesses:      " << cache.accesses() << "\n"
+              << p << "  reads:       " << cache.reads() << "\n"
+              << p << "  writes:      " << cache.writes() << "\n"
+              << p << "hits:          " << cache.hits() << "\n"
+              << p << "misses:        " << cache.misses() << "\n"
+              << p << "  read misses: " << cache.read_misses() << "\n"
+              << p << "  write misses: " << cache.write_misses() << "\n"
+              << std::fixed << std::setprecision(2)
+              << p << "hit rate:      " << (total ? 100.0 - miss_rate : 0.0) << "%\n"
+              << p << "miss rate:     " << miss_rate << "%\n"
+              << p << "dirty evictions: " << cache.dirty_evictions() << "\n\n";
+}
+
+int main(int argc, char** argv) {
+    LevelOptions l1, l2;
+    l2.cfg.size = 256 * 1024;
+    bool use_l2 = false;
     bool include_instr = false;
     std::string trace_path;
 
@@ -47,27 +118,15 @@ int main(int argc, char** argv) {
                 return argv[++i];
             };
             if (arg == "-h" || arg == "--help") { std::cout << USAGE; return 0; }
-            else if (arg == "-s") cfg.size = parse_size(value());
-            else if (arg == "-b") cfg.block = uint32_t(parse_size(value()));
-            else if (arg == "-a") {
-                std::string v = value();
-                cfg.assoc = v == "full" ? 0 : uint32_t(parse_size(v));
-            } else if (arg == "-p") {
-                std::string v = value();
-                if (v == "lru") cfg.policy = Policy::LRU;
-                else if (v == "fifo") cfg.policy = Policy::FIFO;
-                else throw std::invalid_argument("unknown policy: " + v);
-            } else if (arg == "-w") {
-                std::string v = value();
-                if (v == "wb") cfg.write = WritePolicy::WriteBack;
-                else if (v == "wt") cfg.write = WritePolicy::WriteThrough;
-                else throw std::invalid_argument("unknown write policy: " + v);
-            } else if (arg == "-W") {
-                std::string v = value();
-                if (v == "wa") cfg.alloc = AllocPolicy::WriteAllocate;
-                else if (v == "nwa") cfg.alloc = AllocPolicy::NoWriteAllocate;
-                else throw std::invalid_argument("unknown allocation policy: " + v);
-                alloc_given = true;
+            else if (arg == "-s") set_option(l1, "size", value());
+            else if (arg == "-b") set_option(l1, "block", value());
+            else if (arg == "-a") set_option(l1, "assoc", value());
+            else if (arg == "-p") set_option(l1, "policy", value());
+            else if (arg == "-w") set_option(l1, "write", value());
+            else if (arg == "-W") set_option(l1, "alloc", value());
+            else if (arg.compare(0, 5, "--l2-") == 0) {
+                set_option(l2, arg.substr(5), value());
+                use_l2 = true;
             } else if (arg == "-i") include_instr = true;
             else if (arg[0] == '-') throw std::invalid_argument("unknown option: " + arg);
             else trace_path = arg;
@@ -75,22 +134,30 @@ int main(int argc, char** argv) {
         if (trace_path.empty()) { std::cerr << USAGE; return 2; }
 
         // The usual pairings: write-back + write-allocate, write-through + no-write-allocate
-        if (!alloc_given)
-            cfg.alloc = cfg.write == WritePolicy::WriteBack ? AllocPolicy::WriteAllocate
-                                                            : AllocPolicy::NoWriteAllocate;
+        for (LevelOptions* level : {&l1, &l2})
+            if (!level->alloc_given)
+                level->cfg.alloc = level->cfg.write == WritePolicy::WriteBack
+                                       ? AllocPolicy::WriteAllocate
+                                       : AllocPolicy::NoWriteAllocate;
+
+        // An L1 block must fit inside one L2 block, or one L1 fetch would span two L2 blocks
+        if (use_l2 && l2.cfg.block < l1.cfg.block)
+            throw std::invalid_argument("L2 block size must be at least the L1 block size");
     } catch (const std::exception& e) {
         std::cerr << "error: " << e.what() << "\n";
         return 2;
     }
 
-    Cache cache = [&] {
-        try {
-            return Cache(cfg);
-        } catch (const std::exception& e) {
-            std::cerr << "error: " << e.what() << "\n";
-            std::exit(2);
-        }
-    }();
+    // Build bottom-up: L2 first, so L1 can point at it.
+    std::unique_ptr<Cache> l2_cache, l1_cache;
+    try {
+        if (use_l2) l2_cache.reset(new Cache(l2.cfg));
+        l1_cache.reset(new Cache(l1.cfg, l2_cache.get()));
+    } catch (const std::exception& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 2;
+    }
+    Cache& cache = *l1_cache;
 
     TraceReader trace(trace_path);
     if (!trace.ok()) {
@@ -110,37 +177,18 @@ int main(int argc, char** argv) {
     }
 
     // The program is over: blocks still dirty must be saved, or write-back would look free.
+    // Top to bottom, so L1's dirty blocks land in L2 before L2 is flushed.
     cache.flush();
+    if (l2_cache) l2_cache->flush();
 
-    double total = double(cache.accesses());
-    double hit_rate = total ? 100.0 * cache.hits() / total : 0.0;
+    print_level("L1", cache);
+    if (l2_cache) print_level("L2", *l2_cache);
 
-    std::cout << "cache:         ";
-    if (cfg.size >= 1024) std::cout << cfg.size / 1024 << " KB, ";
-    else std::cout << cfg.size << " B, ";
-    std::cout << cfg.block << " B blocks, ";
-    if (cache.num_sets() == 1) std::cout << "fully associative";
-    else std::cout << cache.ways() << "-way, " << cache.num_sets() << " sets";
-    std::cout << ", " << (cfg.policy == Policy::LRU ? "LRU" : "FIFO") << "\n"
-              << "write policy:  "
-              << (cfg.write == WritePolicy::WriteBack ? "write-back" : "write-through") << " + "
-              << (cfg.alloc == AllocPolicy::WriteAllocate ? "write-allocate" : "no-write-allocate") << "\n"
-              << "address:       tag | " << cache.index_bits() << " index bits | "
-              << cache.offset_bits() << " offset bits\n"
-              << "accesses:      " << cache.accesses() << "\n"
-              << "  reads:       " << cache.reads() << "\n"
-              << "  writes:      " << cache.writes() << "\n"
-              << "hits:          " << cache.hits() << "\n"
-              << "misses:        " << cache.misses() << "\n"
-              << "  read misses: " << cache.read_misses() << "\n"
-              << "  write misses: " << cache.write_misses() << "\n"
-              << std::fixed << std::setprecision(2)
-              << "hit rate:      " << hit_rate << "%\n"
-              << "miss rate:     " << (total ? 100.0 - hit_rate : 0.0) << "%\n"
-              << "memory traffic:\n"
-              << "  bytes read:    " << cache.bytes_read_from_memory() << "\n"
-              << "  bytes written: " << cache.bytes_written_to_memory() << "\n"
-              << "  dirty evictions: " << cache.dirty_evictions() << "\n";
+    // Traffic to main memory is whatever the bottom level sent below it.
+    const Cache& bottom = l2_cache ? *l2_cache : cache;
+    std::cout << "memory traffic:\n"
+              << "  bytes read:    " << bottom.bytes_read_below() << "\n"
+              << "  bytes written: " << bottom.bytes_written_below() << "\n";
     if (trace.skipped_lines)
         std::cout << "(skipped " << trace.skipped_lines << " unreadable lines)\n";
     return 0;

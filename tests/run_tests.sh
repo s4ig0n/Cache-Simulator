@@ -87,6 +87,24 @@ check_mem() {
     fi
 }
 
+# check_l2 <name> <L2 accesses> <L2 misses> <trace file> [options...]
+check_l2() {
+    local name=$1 want="$2 $3" trace=$4
+    shift 4
+    local got
+    got=$("$SIM" "$@" "$trace" 2>&1 | awk '
+        $1 == "L2" && $2 == "accesses:" { a = $3 }
+        $1 == "L2" && $2 == "misses:"   { m = $3 }
+        END { print a, m }')
+    if [ "$got" = "$want" ]; then
+        echo "  PASS  $name"
+        pass=$((pass + 1))
+    else
+        echo "  FAIL  $name: expected L2 accesses/misses = $want, got $got"
+        fail=$((fail + 1))
+    fi
+}
+
 # Ten 4-byte stores to the same address.
 for _ in 1 2 3 4 5 6 7 8 9 10; do echo " S 00,4"; done > "$TMP/ten_stores.trace"
 
@@ -124,6 +142,17 @@ check_mem "write-through + allocate"        16 40 0 "$TMP/ten_stores.trace" -s 6
 check_mem "dirty block saved on eviction"   32 16 1 "$TMP/evict_dirty.trace" -s 64 -b 16 -a 1 -w wb
 # Write-through: the store goes straight to memory (4), only block 4 is fetched (16).
 check_mem "write-through never dirty"       16 4 0  "$TMP/evict_dirty.trace" -s 64 -b 16 -a 1 -w wt
+
+# L1: 64 B direct-mapped, L2: 128 B 2-way, 16-byte blocks, both write-back.
+# L1 misses 5 times (00, 40, 00 again, 10, 50), and evicts dirty block 1 once.
+# L2 sees those 5 fetches + 1 dirty write = 6 accesses. The second fetch of 00 hits in L2,
+# because L2 has room for blocks 0 and 4 side by side. So L2 misses 4 times.
+L1_L2="-s 64 -b 16 -a 1 --l2-size 128 --l2-block 16 --l2-assoc 2"
+check     "L1 unchanged by adding L2"   5 7    examples/sample.trace $L1_L2
+check_l2  "L2 catches an L1 miss"       6 4    examples/sample.trace $L1_L2
+# Memory: 4 blocks fetched (64 B). Dirty block 1 sits in L2 until the final flush (16 B).
+check_mem "memory sees only L2 misses"  64 16 1 examples/sample.trace $L1_L2
+check_mem "same trace without L2"       80 16 1 examples/sample.trace -s 64 -b 16 -a 1
 
 echo
 echo "$pass passed, $fail failed"
