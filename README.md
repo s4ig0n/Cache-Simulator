@@ -14,9 +14,10 @@ the hit and miss rates.
 - Optional second cache level (L2) with its own settings
 - Average memory access time (AMAT), from configurable L1, L2, and memory latencies
 - Sample workloads plus a script that records their traces with Valgrind
+- Experiments that sweep each setting across all workloads and graph the results ([below](#experiments))
 
 ### Roadmap
-- [ ] Experiments: miss rate vs. associativity, cache size, and block size, with graphs
+- [ ] Validate miss rates against Valgrind's Cachegrind
 
 ## Building
 
@@ -118,6 +119,74 @@ Or trace any program of your own:
 ```bash
 valgrind --tool=lackey --trace-mem=yes --log-file=prog.trace ./your_program
 ```
+
+## Experiments
+
+`experiments/run_experiments.py` runs the simulator about 170 times, changing one setting at a time,
+on all four workloads. The raw numbers are in `results/*.csv`.
+
+```bash
+./scripts/make_traces.sh                  # in WSL/Linux: record the traces
+python experiments/run_experiments.py     # about 30 seconds
+```
+
+Unless a graph says otherwise, L1 is 32 KB, 8-way, 64 B blocks, LRU, write-back.
+
+### Associativity
+
+![Miss rate vs. associativity](results/associativity.png)
+
+- **matmul** misses about 47% of the time in a 16 KB cache at every associativity up to 16-way, then drops to 6%
+  when fully associative. Walking down a column of a 64 x 64 matrix of doubles jumps 512 bytes (8 blocks) each step,
+  so the column only ever lands in a few sets, and those sets thrash while the rest of the cache sits empty.
+  These are **conflict misses**, which only more ways (or a different layout) can fix.
+- At 32 KB, matmul is not even monotonic: 2-way (3.6%) beats 8-way (8.3%) and 16-way (14.1%).
+  More associativity is not automatically better.
+- **sequential**, **random**, and **histogram** barely change: their misses come from data that is used once,
+  too big, or already fits, none of which associativity helps.
+
+### Cache size
+
+![Miss rate vs. cache size](results/cache_size.png)
+
+Each program's miss rate falls sharply once the cache can hold its **working set** (the data it's actively using):
+histogram's 16 KB of counters at 16 KB (23% → 0.4%), matmul's 96 KB of matrices between 32 KB and 64 KB
+(47% → 0.6%), and sequential's 1 MB array at 1 MB (6% → 3%, because the second pass over the array now hits).
+random's 4 MB array never fully fits.
+
+### Block size
+
+![Block size](results/block_size.png)
+
+- **sequential** halves its miss rate every time the block size doubles (24% at 16 B → 0.85% at 512 B),
+  because it uses every byte of every block.
+- **random** gains nothing (85% at every size) but drags in 32x more data (4 MB → 127 MB).
+- **matmul** is best at 64 B (8.3%). Bigger blocks mean fewer of them fit, and it gets worse again (12.3% at 512 B).
+
+### LRU vs. FIFO
+
+![Replacement](results/replacement.png)
+
+On these programs the two policies are within 0.1 percentage points of each other. Their misses are dominated by
+data that doesn't fit or isn't reused, which no replacement policy can fix.
+
+### Write-back vs. write-through
+
+![Write policy](results/write_policy.png)
+
+- **histogram** keeps updating the same counters: write-back writes **58 KB** to memory, write-through **1,127 KB** (19x more).
+- **sequential** writes each element once: write-through + no-write-allocate *reads* half as much (1.1 MB vs. 2.2 MB),
+  because it never fetches blocks it's only going to overwrite.
+
+### L2 cache and AMAT
+
+![L2 AMAT](results/l2_amat.png)
+
+- **matmul** runs 55% faster with any L2 of 64 KB or more (12.3 → 5.5 cycles per access): its data doesn't fit in L1 but fits in L2.
+- **random** and **sequential** get *slower* with a small L2 (random 89 → 99 cycles with 64 KB). Every L1 miss now
+  pays 12 extra cycles to check an L2 that almost never has the data. L2 only pays off once it can hold the working set
+  (random: 36 cycles with a 4 MB L2).
+- **histogram** doesn't care: it already fits in L1.
 
 ## How it works
 

@@ -1,0 +1,9 @@
+workload,write,miss_rate,l2_miss_rate,bytes_read,bytes_written,amat
+sequential,wb,6.05,,2204864.0,1092800.0,10.05
+sequential,wt,49.5,,1144128.0,1153825.0,7.14
+random,wb,85.15,,16754368.0,44288.0,89.15
+random,wt,85.71,,16742272.0,105220.0,89.09
+matmul,wb,8.27,,3084416.0,372864.0,12.27
+matmul,wt,9.26,,2542912.0,206291.0,10.82
+histogram,wb,0.33,,120448.0,59328.0,4.33
+histogram,wt,0.63,,108416.0,1153800.0,4.3
