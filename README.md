@@ -15,9 +15,10 @@ the hit and miss rates.
 - Average memory access time (AMAT), from configurable L1, L2, and memory latencies
 - Sample workloads plus a script that records their traces with Valgrind
 - Experiments that sweep each setting across all workloads and graph the results ([below](#experiments))
+- Validated against Valgrind's Cachegrind: L1 miss counts agree within 0.06% ([below](#validation-against-cachegrind))
 
 ### Roadmap
-- [ ] Validate miss rates against Valgrind's Cachegrind
+- [ ] Model block transfer time, so memory cost grows with block size
 
 ## Building
 
@@ -187,6 +188,32 @@ data that doesn't fit or isn't reused, which no replacement policy can fix.
   pays 12 extra cycles to check an L2 that almost never has the data. L2 only pays off once it can hold the working set
   (random: 36 cycles with a 4 MB L2).
 - **histogram** doesn't care: it already fits in L1.
+
+## Validation against Cachegrind
+
+Valgrind ships its own cache simulator, Cachegrind. `scripts/validate_cachegrind.sh` runs it and cachesim on
+the same four programs with the same L1 settings (LRU, write-allocate) and compares the number of data misses:
+
+```bash
+./scripts/validate_cachegrind.sh     # in WSL/Linux, about 30 seconds
+```
+
+| L1 configuration | Largest difference (any workload) |
+|---|---|
+| 32 KB, 8-way, 64 B blocks | 1 miss (0.05%) |
+| 16 KB, direct-mapped, 64 B blocks | 1 miss (0.03%) |
+| 8 KB, 4-way, 32 B blocks | 4 misses (0.004%) |
+| 16 KB, fully associative, 64 B blocks | 1 miss (0.05%) |
+
+All 16 results are in `results/cachegrind_validation.csv`. Access totals differ slightly because Cachegrind counts
+a modify (e.g. `x++`) as one access while cachesim counts a read and a write; the write always hits, so miss
+counts are unaffected.
+
+One lesson from getting this to agree: the first attempt was off by up to 13% on direct-mapped caches. The cause
+wasn't the simulator. The trace and the Cachegrind run were started from different directories, which changes
+the environment variables on the program's stack and shifts every stack address. In a direct-mapped cache that's
+enough to change which data collide. The script now records its own trace and runs Cachegrind under identical
+conditions.
 
 ## How it works
 
