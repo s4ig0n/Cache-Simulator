@@ -15,6 +15,7 @@ the hit and miss rates.
 - Average memory access time (AMAT), from configurable L1, L2, and memory latencies
 - Sample workloads plus a script that records their traces with Valgrind
 - Experiments that sweep each setting across all workloads and graph the results ([below](#experiments))
+- Multi-core mode: one L1 per core kept coherent with the MESI protocol over a snooping bus ([below](#multi-core-coherence-mesi))
 - Validated against Valgrind's Cachegrind: L1 miss counts agree within 0.06% ([below](#validation-against-cachegrind))
 
 ### Roadmap
@@ -39,9 +40,12 @@ Builds the simulator and runs it on small traces whose hit/miss counts were work
 ## Usage
 
 ```
-cachesim [options] <trace-file>
+cachesim [options] <trace-file> [more trace files...]
 
-L1 options:
+One trace file simulates one core. Several trace files simulate a multi-core CPU:
+one core per file, each with its own L1, kept coherent with the MESI protocol.
+
+L1 options (every core gets the same L1):
   -s SIZE    cache size, e.g. 32K, 1M     (default 32K)
   -b BYTES   block size                   (default 64)
   -a WAYS    associativity, or "full"     (default 8)
@@ -51,7 +55,7 @@ L1 options:
              on a write miss                 (default wa for wb, nwa for wt)
   -L CYCLES  hit time                     (default 4)
 
-L2 options (L2 is only added if you give at least one of these):
+L2 options (L2 is only added if you give at least one of these; shared by all cores):
   --l2-size SIZE     (default 256K)      --l2-policy POLICY  (default lru)
   --l2-block BYTES   (default 64)        --l2-write POLICY   (default wb)
   --l2-assoc WAYS    (default 8)         --l2-alloc POLICY
@@ -188,6 +192,82 @@ data that doesn't fit or isn't reused, which no replacement policy can fix.
   pays 12 extra cycles to check an L2 that almost never has the data. L2 only pays off once it can hold the working set
   (random: 36 cycles with a 4 MB L2).
 - **histogram** doesn't care: it already fits in L1.
+
+## Multi-core coherence (MESI)
+
+Give `cachesim` several trace files and it simulates a multi-core CPU: one core per file, each with
+its own private L1, all sharing the L2 (if any) and memory. The cores take turns, one memory access
+each per turn.
+
+When several cores cache the same block, a write by one makes the others' copies stale. The caches
+stay consistent with the **MESI** protocol. Every line is in one of four states:
+
+| State | Meaning |
+|---|---|
+| **M**odified | changed here; the only up-to-date copy anywhere |
+| **E**xclusive | clean, and no other cache has it |
+| **S**hared | clean, and other caches may have it too |
+| **I**nvalid | nothing useful here |
+
+The L1s are connected by a snooping **bus**. Before a core reads or changes a block it doesn't fully
+own, it announces it, and every other cache reacts:
+
+| Core does | Announces | Other caches with a copy |
+|---|---|---|
+| read miss | `BusRd` | Modified: save it to memory, then → Shared. Exclusive → Shared. |
+| write miss | `BusRdX` | Modified: save it to memory first. Then → Invalid. |
+| write hit on a Shared line | `BusUpgr` | → Invalid |
+| write hit on an Exclusive line | nothing (nobody else has it) | |
+
+A single core is just MESI with nobody to share with: lines are only ever Exclusive (clean) or Modified (dirty).
+
+### Multi-threaded traces
+
+Lackey doesn't record which thread made an access, so each thread of the programs in `workloads/mt/`
+runs as its own process (`./program <thread id> <thread count>`). They're built without PIE, so
+global variables sit at the same address in every run and the threads' traces agree on where shared
+data lives. `ROI_BEGIN()`/`ROI_END()` mark the region of interest, and the script keeps only the trace
+lines in between, dropping program startup.
+
+```bash
+./scripts/make_mt_traces.sh 4       # in WSL/Linux: 4 threads per program
+./cachesim traces/mt/false_sharing.t0.trace traces/mt/false_sharing.t1.trace            traces/mt/false_sharing.t2.trace traces/mt/false_sharing.t3.trace
+```
+
+| Program | What each thread does |
+|---|---|
+| `true_sharing` | adds 20,000 times to one counter shared by all threads |
+| `false_sharing` | adds 20,000 times to its *own* counter, but all counters sit in one 64-byte block |
+| `padded` | the same, with each counter padded to its own block |
+| `parallel_sum` | sums its quarter of a shared read-only 256 KB array |
+
+### Results (4 cores, 32 KB 8-way L1s)
+
+| Program | Miss rate | Coherence misses | Invalidations | Bus transactions | AMAT (cycles) |
+|---|---|---|---|---|---|
+| true_sharing | 75.0% | 119,997 | 120,000 | 140,001 | 79.0 |
+| false_sharing | 75.0% | 119,997 | 120,000 | 140,001 | 79.0 |
+| padded | 0.003% | 0 | 0 | 4 | 4.0 |
+| parallel_sum | 6.3% | 0 | 0 | 4,100 | 10.3 |
+
+- **False sharing is exactly as costly as true sharing.** The threads never touch each other's
+  counters, but the cache tracks whole blocks, so the block ping-pongs between cores on every write.
+- **Padding each counter to its own block removes it entirely**: 4 misses instead of 120,001, and
+  about 20x lower AMAT.
+- **Read-only sharing is free.** `parallel_sum`'s 6.3% is the normal one miss per 16 ints; its blocks
+  sit in the Shared state without any invalidations.
+
+The 75% can be worked out by hand: in each round of 4 loads and 4 stores, the core that wrote last
+still has the block, so 3 loads miss; then the first store invalidates everyone else, so the other
+3 stores miss. 6 of every 8 accesses miss.
+
+### Simplifications
+
+- Cores take strict turns, one access each. Real threads run in bursts, so this is close to the worst
+  case for sharing.
+- A Modified copy is written to memory before another core reads it (no direct cache-to-cache transfer),
+  and bus messages cost no extra time; only the misses themselves do.
+- Multi-core mode needs write-back, write-allocate L1 caches, which is what MESI is designed for.
 
 ## Validation against Cachegrind
 

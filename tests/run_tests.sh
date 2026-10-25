@@ -120,6 +120,29 @@ check_amat() {
     fi
 }
 
+# check_fields <name> <"label=value|label=value|..."> <cachesim arguments...>
+# Each label is the start of an output line; its last word must equal the value.
+check_fields() {
+    local name=$1 spec=$2
+    shift 2
+    local out pair label want got problems=""
+    out=$("$SIM" "$@" 2>&1)
+    IFS='|' read -ra pairs <<< "$spec"
+    for pair in "${pairs[@]}"; do
+        label=${pair%=*}
+        want=${pair##*=}
+        got=$(echo "$out" | awk -v l="$label" 'index($0, l) == 1 { print $NF; exit }')
+        [ "$got" = "$want" ] || problems="$problems [$label expected $want, got ${got:-?}]"
+    done
+    if [ -z "$problems" ]; then
+        echo "  PASS  $name"
+        pass=$((pass + 1))
+    else
+        echo "  FAIL  $name:$problems"
+        fail=$((fail + 1))
+    fi
+}
+
 # Ten 4-byte stores to the same address.
 for _ in 1 2 3 4 5 6 7 8 9 10; do echo " S 00,4"; done > "$TMP/ten_stores.trace"
 
@@ -180,6 +203,54 @@ check_amat "custom hit and memory time" 8.14  examples/sample.trace -s 64 -b 16 
 check_amat "AMAT, write-back stores"    14.00 "$TMP/ten_stores.trace" -s 64 -b 16 -a full -w wb
 # Write-through + no-write-allocate: every store misses but nobody waits for memory: 10 x 4 / 10
 check_amat "writes going down are free" 4.00  "$TMP/ten_stores.trace" -s 64 -b 16 -a full -w wt
+
+# ---- Multi-core MESI: one trace file per core, cores take turns one access at a time ----
+# (default 32 KB 8-way L1 with 64-byte blocks, so addresses 00 and 08 share a block, 40 doesn't)
+
+# Both cores read block 0. Core 0 gets it Exclusive, then core 1's read makes both Shared.
+printf ' L 00,4\n' > "$TMP/c0_read.trace"
+printf ' L 00,4\n' > "$TMP/c1_read.trace"
+check_fields "MESI: two readers share a block" \
+    "C0 misses:=1|C1 misses:=1|C0 invalidations:=0|C1 invalidations:=0|  reads (BusRd):=2|  upgrades (BusUpgr):=0" \
+    "$TMP/c0_read.trace" "$TMP/c1_read.trace"
+
+# Turn 1: core 0 reads block 0 (Exclusive). Turn 2: core 1 reads it (both Shared).
+# Turn 3: core 0 writes it: a hit, but Shared, so it sends an upgrade and core 1 is invalidated.
+# Turn 4: core 1 reads it again: a coherence miss. Core 0 has it Modified, so it saves it to
+#         memory (a snoop write-back, 64 bytes) and both end up Shared.
+printf ' L 00,4\n S 00,4\n' > "$TMP/c0_upgrade.trace"
+printf ' L 00,4\n L 00,4\n' > "$TMP/c1_upgrade.trace"
+check_fields "MESI: write to a shared block upgrades and invalidates" \
+    "C0 misses:=1|C0 upgrades:=1|C0 snoop write-backs:=1|C1 misses:=2|C1 invalidations:=1|C1 coherence misses:=1|  reads (BusRd):=3|  upgrades (BusUpgr):=1|  bytes read:=192|  bytes written:=64" \
+    "$TMP/c0_upgrade.trace" "$TMP/c1_upgrade.trace"
+
+# Core 0 reads block 0 alone (Exclusive), then writes it: Exclusive -> Modified needs no bus
+# message at all. Core 1 only touches block 1. At the end, core 0's Modified block is saved.
+printf ' L 40,4\n' > "$TMP/c1_other.trace"
+check_fields "MESI: writing an Exclusive block is silent" \
+    "C0 upgrades:=0|  upgrades (BusUpgr):=0|  read-exclusives (BusRdX):=0|  bytes written:=64" \
+    "$TMP/c0_upgrade.trace" "$TMP/c1_other.trace"
+
+# False sharing: core 0 writes bytes 00-03, core 1 writes bytes 08-0b. Different variables,
+# same 64-byte block, so every write steals the block from the other core.
+# All 6 writes miss (BusRdX each). Core 0 is invalidated 3 times, core 1 twice; each
+# invalidated Modified copy is saved first (5 snoop write-backs), plus core 1's final flush.
+for _ in 1 2 3; do echo " S 00,4"; done > "$TMP/c0_false.trace"
+for _ in 1 2 3; do echo " S 08,4"; done > "$TMP/c1_false.trace"
+check_fields "MESI: false sharing ping-pongs the block" \
+    "C0 misses:=3|C1 misses:=3|C0 coherence misses:=2|C1 coherence misses:=2|C0 invalidations:=3|C1 invalidations:=2|C0 snoop write-backs:=3|C1 snoop write-backs:=2|  read-exclusives (BusRdX):=6|  bytes written:=384" \
+    "$TMP/c0_false.trace" "$TMP/c1_false.trace"
+
+# The fix: put core 1's variable in a different block (byte 40). One miss each, no coherence traffic.
+for _ in 1 2 3; do echo " S 40,4"; done > "$TMP/c1_padded.trace"
+check_fields "MESI: padding removes false sharing" \
+    "C0 misses:=1|C1 misses:=1|C0 invalidations:=0|C1 invalidations:=0|  read-exclusives (BusRdX):=2" \
+    "$TMP/c0_false.trace" "$TMP/c1_padded.trace"
+
+# MESI needs write-back caches
+check_fields "MESI rejects write-through" \
+    "error:=caches" \
+    -w wt "$TMP/c0_false.trace" "$TMP/c1_false.trace"
 
 echo
 echo "$pass passed, $fail failed"
