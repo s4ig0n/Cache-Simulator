@@ -1,8 +1,17 @@
 # Cache Simulator
 
+[![tests](https://github.com/s4ig0n/Cache-Simulator/actions/workflows/tests.yml/badge.svg)](https://github.com/s4ig0n/Cache-Simulator/actions/workflows/tests.yml)
+
 A CPU cache simulator written in C++. It reads a memory trace (the list of addresses a program
 accesses, as recorded by Valgrind), simulates how a cache would handle each access, and reports
 the hit and miss rates.
+
+**Highlights**
+
+- L1 miss counts match Valgrind's Cachegrind within **0.06%** across 16 configurations ([validation](#validation-against-cachegrind))
+- Multi-core mode with **MESI** coherence shows false sharing costing as much as true sharing, and padding eliminating it ([coherence](#multi-core-coherence-mesi))
+- About 170 experiments across 4 workloads, graphed below ([experiments](#experiments))
+- 33 hand-verified checks run in CI on every push
 
 ## Features
 
